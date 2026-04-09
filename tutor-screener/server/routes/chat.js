@@ -42,7 +42,7 @@ router.post('/', async (req, res) => {
     try {
       // Predefined interview questions
       const QUESTIONS = [
-        "THIS IS TEST QUESTION",
+        "Can you tell me about your teaching experience?",
         "How do you handle a student who is struggling to understand a concept?",
         "How do you keep students engaged during a lesson?",
         "How do you ensure a student has truly understood a topic?",

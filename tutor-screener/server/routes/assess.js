@@ -38,6 +38,24 @@ function normalizeResult(r) {
   };
 }
 
+async function callGeminiWithRetry(model, prompt, retries = 5, baseDelay = 2000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await model.generateContent(prompt);
+    } catch (err) {
+      const isRetryable = err.message.includes('429') || err.message.includes('503');
+
+      if (isRetryable && i < retries - 1) {
+        const delay = baseDelay * Math.pow(2, i); // exponential backoff
+        console.log(`Retrying Gemini... attempt ${i + 1}, waiting ${delay}ms`);
+        await new Promise(res => setTimeout(res, delay));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
 router.post('/', async (req, res) => {
   try {
     const { transcript } = req.body;
@@ -45,14 +63,12 @@ router.post('/', async (req, res) => {
     let result;
 
     try {
-      // Primary: Claude (strict JSON)
-      const response = await client.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1000,
-        messages: [
-          {
-            role: 'user',
-            content: `You are an experienced, fair, and human interviewer evaluating a tutor candidate for teaching kids (ages 6–16).
+      const { GoogleGenerativeAI } = require("@google/generative-ai");
+      const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+      const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+      const geminiRes = await callGeminiWithRetry(model, `
+You are an experienced, fair, and human interviewer evaluating a tutor candidate for teaching kids (ages 6–16).
 
 Focus ONLY on soft skills:
 - Communication clarity
@@ -66,91 +82,10 @@ Be grounded in the transcript. Use SPECIFIC quotes from the candidate as evidenc
 Transcript:
 ${transcript}
 
-Return ONLY valid JSON (no markdown, no extra text) in this exact format:
-{
-  "recommendation": "Pass | Maybe | Reject",
-  "summary": "2 concise sentences summarizing overall performance in a friendly, professional tone",
-  "scores": {
-    "clarity": {"score": 1-10, "quote": "exact quote from candidate"},
-    "warmth": {"score": 1-10, "quote": "exact quote"},
-    "patience": {"score": 1-10, "quote": "exact quote"},
-    "simplicity": {"score": 1-10, "quote": "exact quote"},
-    "fluency": {"score": 1-10, "quote": "exact quote"}
-  }
-}
-
-Scoring guidance:
-- 8–10: strong, clear, natural, student-friendly
-- 5–7: acceptable but inconsistent
-- 1–4: unclear, robotic, or not student-friendly
-
-Do not hallucinate quotes. If evidence is weak, reflect that in score.`
-          }
-        ]
-      });
-
-      result = normalizeResult(JSON.parse(response.content[0].text));
-
-    } catch (apiError) {
-      console.log('Claude failed, switching to Phi-3...', apiError.message);
-
-      try {
-        // First fallback: Phi-3 (local)
-        const ollamaRes = await fetch('http://localhost:11434/api/generate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: 'phi3',
-            prompt: `You are evaluating a tutor candidate for kids (6–16). Focus on clarity, warmth, patience, simplicity, and fluency.
-
-Transcript:
-${transcript}
-
-Write:
-- A friendly 2 sentence summary
-- A final recommendation (Pass/Maybe/Reject)
-- Scores (1-10) for clarity, warmth, patience, simplicity, fluency
-- Include a short reason with a brief quote from the candidate for each score
-
-Keep it concise and human-like.`,
-            stream: false
-          })
-        });
-
-        const data = await ollamaRes.json();
-        const text = data.response || '';
-
-        result = normalizeResult({
-          recommendation: text.includes('Pass') ? 'Pass' : text.includes('Reject') ? 'Reject' : 'Maybe',
-          summary: text.slice(0, 200),
-          scores: {
-            clarity: { score: 6, quote: 'Based on overall explanation quality' },
-            warmth: { score: 6, quote: 'Based on tone inferred' },
-            patience: { score: 6, quote: 'Based on responses' },
-            simplicity: { score: 6, quote: 'Based on explanation simplicity' },
-            fluency: { score: 6, quote: 'Based on language fluency' }
-          }
-        });
-
-      } catch (phiError) {
-        console.log('Phi-3 failed, switching to Gemini...', phiError.message);
-
-        try {
-          // Final fallback: Gemini
-          const { GoogleGenerativeAI } = require("@google/generative-ai");
-          const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-          const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-
-          const geminiRes = await model.generateContent(`
-You are a human interviewer evaluating a tutor for kids (6–16). Use the transcript to assess clarity, warmth, patience, simplicity, and fluency with quotes.
-
-Transcript:
-${transcript}
-
 Return STRICT JSON only:
 {
   "recommendation": "Pass | Maybe | Reject",
-  "summary": "2 concise sentences",
+  "summary": "2 concise sentences summarizing overall performance",
   "scores": {
     "clarity": {"score": 1-10, "quote": "..."},
     "warmth": {"score": 1-10, "quote": "..."},
@@ -160,34 +95,42 @@ Return STRICT JSON only:
   }
 }
 
-No markdown. No backticks. No extra text.`)
+No markdown. No backticks. No extra text.`);
 
-          const raw = geminiRes.response.text();
-          console.log("Gemini raw response:", raw);
-          const clean = raw
-            .replace(/```json|```/g, '')
-            .replace(/^[^\{]*/, '')
-            .replace(/[^\}]*$/, '')
-            .trim();
+      const raw = geminiRes.response.text();
 
-          result = normalizeResult(JSON.parse(clean));
+      const clean = raw
+        .replace(/```json|```/g, '')
+        .replace(/^[^\{]*/, '')
+        .replace(/[^\}]*$/, '')
+        .trim();
 
-        } catch (geminiError) {
-          console.error('All models failed:', geminiError.message);
+      result = normalizeResult(JSON.parse(clean));
 
-          result = normalizeResult({
-            recommendation: "Maybe",
-            summary: "Unable to generate full assessment at this time.",
-            scores: {
-              clarity: { score: 5, quote: "Fallback default" },
-              warmth: { score: 5, quote: "Fallback default" },
-              patience: { score: 5, quote: "Fallback default" },
-              simplicity: { score: 5, quote: "Fallback default" },
-              fluency: { score: 5, quote: "Fallback default" }
-            }
-          });
-        }
+    } catch (error) {
+      console.error('Gemini failed:', error.message);
+
+      let userMessage = "Unable to generate assessment at this time.";
+
+      if (error.message.includes('429')) {
+        userMessage = "Report not generated: Free tier quota exceeded. Please try again later.";
+      } else if (error.message.includes('503')) {
+        userMessage = "Report not generated: AI service is currently overloaded. Please retry in a few seconds.";
+      } else if (error.message.includes('API_KEY_INVALID')) {
+        userMessage = "Report not generated: Invalid or expired API key.";
       }
+
+      result = normalizeResult({
+        recommendation: "Maybe",
+        summary: userMessage,
+        scores: {
+          clarity: { score: 5, quote: "Fallback default" },
+          warmth: { score: 5, quote: "Fallback default" },
+          patience: { score: 5, quote: "Fallback default" },
+          simplicity: { score: 5, quote: "Fallback default" },
+          fluency: { score: 5, quote: "Fallback default" }
+        }
+      });
     }
 
     res.json(result);

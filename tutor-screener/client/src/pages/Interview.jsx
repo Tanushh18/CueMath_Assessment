@@ -409,7 +409,7 @@ function Confetti() {
 // ─── API call ─────────────────────────────────────────────────────────────────
 async function callAPI(messages) {
   try {
-    const res = await fetch('http://localhost:1000/api/chat', {
+    const res = await fetch('https://cuemath-assessment1.onrender.com/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages }),
@@ -543,7 +543,7 @@ export default function Interview({ name, onFinish }) {
             .map(m => `${m.role.toUpperCase()}: ${m.content}`)
             .join("\n");
 
-          const res = await fetch('http://localhost:1000/api/assess', {
+          const res = await fetch('https://cuemath-assessment1.onrender.com/api/assess', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ transcript })
